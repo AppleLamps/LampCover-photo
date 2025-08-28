@@ -2,8 +2,8 @@
 @import "tailwindcss";
 
 /* Import theme variables and component styles */
-@import "./theme.css";
-@import "./components.css";
+@import "./styles/theme.css";
+@import "./styles/components.css";
 
 /* Tailwind theme configuration */
 @theme inline {

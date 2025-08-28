@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { extractFrame, addCoverImage } from '@/lib/ffmpeg-secure';
+import { fileTypeFromBuffer } from 'file-type';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -7,16 +8,114 @@ import os from 'os';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-// Concurrent request limiting
+// Enhanced rate limiting system
+interface RateLimitEntry {
+  requests: number;
+  lastReset: number;
+  blocked: boolean;
+  blockUntil?: number;
+}
+
+const rateLimitStore = new Map<string, RateLimitEntry>();
+const MAX_REQUESTS_PER_MINUTE = 10; // Per IP
+const MAX_REQUESTS_PER_HOUR = 50; // Per IP
+const BLOCK_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+const CLEANUP_INTERVAL_MS = 60 * 1000; // 1 minute
+
+// Concurrent request limiting (global)
 let activeRequests = 0;
-const MAX_CONCURRENT_REQUESTS = 3;
+const MAX_CONCURRENT_REQUESTS = 5; // Increased from 3
+
+// Cleanup old entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitStore.entries()) {
+    // Remove entries that haven't been accessed in the last hour
+    if (now - entry.lastReset > 60 * 60 * 1000) {
+      rateLimitStore.delete(ip);
+    }
+  }
+}, CLEANUP_INTERVAL_MS);
 
 /**
- * Validates the content of a video file by checking its magic numbers.
+ * Get client IP address with fallback options
+ */
+function getClientIP(req: NextRequest): string {
+  // Try various headers to get the real client IP
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  
+  const realIp = req.headers.get('x-real-ip');
+  if (realIp) {
+    return realIp.trim();
+  }
+  
+  const cfConnectingIp = req.headers.get('cf-connecting-ip');
+  if (cfConnectingIp) {
+    return cfConnectingIp.trim();
+  }
+  
+  // Fallback to a default if no IP can be determined
+  return 'unknown-ip';
+}
+
+/**
+ * Check rate limit for an IP address
+ */
+function checkRateLimit(ip: string): { allowed: boolean; resetTime?: number; reason?: string } {
+  const now = Date.now();
+  const entry = rateLimitStore.get(ip) || {
+    requests: 0,
+    lastReset: now,
+    blocked: false
+  };
+
+  // Check if IP is currently blocked
+  if (entry.blocked && entry.blockUntil && now < entry.blockUntil) {
+    return {
+      allowed: false,
+      resetTime: entry.blockUntil,
+      reason: 'IP temporarily blocked due to excessive requests'
+    };
+  }
+
+  // Reset counters if it's been more than a minute
+  if (now - entry.lastReset > 60000) {
+    entry.requests = 0;
+    entry.lastReset = now;
+    entry.blocked = false;
+    delete entry.blockUntil;
+  }
+
+  // Check rate limits
+  if (entry.requests >= MAX_REQUESTS_PER_MINUTE) {
+    // Block this IP for 15 minutes
+    entry.blocked = true;
+    entry.blockUntil = now + BLOCK_DURATION_MS;
+    rateLimitStore.set(ip, entry);
+    
+    return {
+      allowed: false,
+      resetTime: entry.blockUntil,
+      reason: 'Rate limit exceeded - too many requests per minute'
+    };
+  }
+
+  // Allow the request and increment counter
+  entry.requests++;
+  rateLimitStore.set(ip, entry);
+  
+  return { allowed: true };
+}
+
+/**
+ * Validates the content of a video file by checking its magic numbers and using file-type library.
  * @param buffer The file content as a Uint8Array.
  * @returns `true` if the file is a valid and supported video type, `false` otherwise.
  */
-function isValidVideoFile(buffer: Uint8Array): boolean {
+async function isValidVideoFile(buffer: Uint8Array): Promise<boolean> {
   // Helper to check for a sequence of bytes at a specific offset
   const bytesAt = (offset: number, sequence: number[]) => {
     if (buffer.length < offset + sequence.length) {
@@ -25,20 +124,64 @@ function isValidVideoFile(buffer: Uint8Array): boolean {
     return sequence.every((byte, i) => buffer[offset + i] === byte);
   };
 
+  // First, use file-type library for more comprehensive detection
+  try {
+    const detectedType = await fileTypeFromBuffer(buffer);
+    if (detectedType) {
+      const supportedMimes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/mpeg'];
+      if (supportedMimes.includes(detectedType.mime)) {
+        return true;
+      }
+    }
+  } catch (error) {
+    console.warn('File type detection failed:', error);
+  }
+
+  // Fallback to manual magic number checking for additional validation
+  
   // Check for MP4/MOV magic numbers ('ftyp' at offset 4)
   // ISO Base Media File Format (covers .mp4, .mov, etc.)
-  if (bytesAt(4, [0x66, 0x74, 0x79, 0x70])) { // 'ftyp'
-    return true;
+  if (buffer.length >= 8 && bytesAt(4, [0x66, 0x74, 0x79, 0x70])) { // 'ftyp'
+    // Additional validation for common MP4 brands
+    const brandBytes = Array.from(buffer.slice(8, 12));
+    const validBrands = [
+      [0x69, 0x73, 0x6F, 0x6D], // 'isom'
+      [0x6D, 0x70, 0x34, 0x31], // 'mp41'
+      [0x6D, 0x70, 0x34, 0x32], // 'mp42'
+      [0x71, 0x74, 0x20, 0x20]   // 'qt  '
+    ];
+    
+    for (const brand of validBrands) {
+      if (brandBytes.every((byte, i) => byte === brand[i])) {
+        return true;
+      }
+    }
   }
 
   // Check for MPEG-PS (Program Stream) pack start code
-  if (bytesAt(0, [0x00, 0x00, 0x01, 0xBA])) {
+  if (buffer.length >= 4 && bytesAt(0, [0x00, 0x00, 0x01, 0xBA])) {
     return true;
   }
 
-  // MPEG-TS (Transport Stream) starts with 0x47 (sync byte)
-  // and should have it every 188 or 204 bytes. Checking the first byte is a good indicator.
-  if (buffer.length > 0 && buffer[0] === 0x47) {
+  // MPEG-TS (Transport Stream) validation - more thorough check
+  if (buffer.length >= 376 && buffer[0] === 0x47) {
+    // Check for sync bytes at regular intervals (188-byte packets)
+    let validSyncBytes = 0;
+    for (let i = 0; i < Math.min(buffer.length, 1880); i += 188) {
+      if (buffer[i] === 0x47) {
+        validSyncBytes++;
+      }
+    }
+    // Should have at least 3 valid sync bytes for a reasonable confidence
+    if (validSyncBytes >= 3) {
+      return true;
+    }
+  }
+
+  // AVI format check
+  if (buffer.length >= 12 && 
+      bytesAt(0, [0x52, 0x49, 0x46, 0x46]) && // 'RIFF'
+      bytesAt(8, [0x41, 0x56, 0x49, 0x20])) { // 'AVI '
     return true;
   }
 
@@ -46,7 +189,24 @@ function isValidVideoFile(buffer: Uint8Array): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  // Check concurrent request limit
+  // Get client IP for rate limiting
+  const clientIP = getClientIP(req);
+  
+  // Check IP-based rate limiting
+  const rateLimitCheck = checkRateLimit(clientIP);
+  if (!rateLimitCheck.allowed) {
+    const response = new Response(rateLimitCheck.reason || 'Rate limit exceeded', { 
+      status: 429,
+      headers: {
+        'Retry-After': rateLimitCheck.resetTime ? 
+          Math.ceil((rateLimitCheck.resetTime - Date.now()) / 1000).toString() : 
+          '900' // 15 minutes
+      }
+    });
+    return response;
+  }
+
+  // Check global concurrent request limit
   if (activeRequests >= MAX_CONCURRENT_REQUESTS) {
     return new Response('Server busy, please try again later', { status: 503 });
   }
@@ -67,35 +227,53 @@ export async function POST(req: NextRequest) {
       return new Response('Missing or invalid timestamp', { status: 400 });
     }
 
-    // Strict numeric validation - only allow digits and decimal point
-    if (!/^\d+(\.\d+)?$/.test(timestampRaw)) {
+    // Sanitize input - remove any non-numeric characters except decimal point
+    const sanitizedTimestamp = timestampRaw.replace(/[^\d.]/g, '');
+    
+    // Additional validation: ensure only one decimal point and valid format
+    if (!/^\d+(\.\d{1,6})?$/.test(sanitizedTimestamp)) {
       return new Response('Invalid timestamp format', { status: 400 });
     }
 
-    const ts = parseFloat(timestampRaw);
+    // Use Number.parseFloat for stricter parsing with additional validation
+    const ts = Number.parseFloat(sanitizedTimestamp);
 
-    // Validate timestamp range and ensure it's a finite number
-    if (!Number.isFinite(ts) || ts < 0 || ts > 86400) { // Max 24 hours
+    // Comprehensive validation - check for finite number, range, and precision
+    if (!Number.isFinite(ts) || ts < 0 || ts > 86400 || ts !== ts) { // Max 24 hours, NaN check
       return new Response('Invalid timestamp range', { status: 400 });
+    }
+
+    // Additional security: ensure the parsed value matches the sanitized input
+    if (ts.toString() !== sanitizedTimestamp && ts.toFixed(6).replace(/\.?0+$/, '') !== sanitizedTimestamp) {
+      return new Response('Timestamp validation failed', { status: 400 });
     }
 
     const timestamp = ts;
 
   // --- Start of security validation ---
   const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-  const ALLOWED_TYPES = ['video/mp4', 'video/mpeg', 'video/quicktime'];
+  const ALLOWED_TYPES = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo'];
+  const ALLOWED_EXTENSIONS = ['.mp4', '.mov', '.mpeg', '.mpg', '.avi'];
 
   if (video.size > MAX_FILE_SIZE) {
     return new Response('File too large. Maximum size is 100MB.', { status: 413 });
   }
 
+  // Enhanced MIME type validation
   if (!ALLOWED_TYPES.includes(video.type)) {
     return new Response(`Invalid file type. Allowed types are: ${ALLOWED_TYPES.join(', ')}`, { status: 400 });
   }
 
+  // File extension validation to prevent MIME type spoofing
+  const fileExt = path.extname(video.name || '').toLowerCase();
+  if (!ALLOWED_EXTENSIONS.includes(fileExt)) {
+    return new Response(`Invalid file extension. Allowed extensions are: ${ALLOWED_EXTENSIONS.join(', ')}`, { status: 400 });
+  }
+
   const videoBuffer = Buffer.from(await video.arrayBuffer());
 
-  if (!isValidVideoFile(videoBuffer)) {
+  // Enhanced magic number validation with file-type library
+  if (!(await isValidVideoFile(videoBuffer))) {
     return new Response('Invalid or unsupported video file content.', { status: 400 });
   }
   // --- End of security validation ---
@@ -176,7 +354,7 @@ export async function POST(req: NextRequest) {
       .replace(/["\r\n]/g, '') // Remove quotes and newlines
       .substring(0, 100); // Limit length
 
-    return new Response(outputFileBuffer, {
+    return new Response(new Uint8Array(outputFileBuffer), {
       status: 200,
       headers: {
         'Content-Type': 'video/mp4',
