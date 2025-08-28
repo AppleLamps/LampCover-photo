@@ -1,0 +1,84 @@
+/* Theme Variables - Extracted for better maintainability */
+
+:root {
+  /* Base Colors */
+  --background: #ffffff;
+  --foreground: #171717;
+  
+  /* Semantic Colors */
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  --secondary: #f5f5f5;
+  --secondary-foreground: var(--foreground);
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #f5f5f5;
+  --accent-foreground: var(--foreground);
+  
+  /* Border & Ring Colors */
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: var(--foreground);
+  
+  /* State Colors */
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  
+  /* Component Specific */
+  --card: var(--background);
+  --card-foreground: var(--foreground);
+  --popover: var(--background);
+  --popover-foreground: var(--foreground);
+  
+  /* Radius */
+  --radius: 0.5rem;
+  
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  
+  /* Transitions */
+  --transition-colors: color 0.15s ease-in-out, background-color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+  --transition-all: all 0.15s ease-in-out;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Base Colors - Dark Mode */
+    --background: #0a0a0a;
+    --foreground: #ededed;
+    
+    /* Semantic Colors - Dark Mode */
+    --primary: var(--foreground);
+    --primary-foreground: var(--background);
+    --secondary: #1a1a1a;
+    --secondary-foreground: var(--foreground);
+    --muted: #1a1a1a;
+    --muted-foreground: #a3a3a3;
+    --accent: #1a1a1a;
+    --accent-foreground: var(--foreground);
+    
+    /* Border & Ring Colors - Dark Mode */
+    --border: #262626;
+    --input: #262626;
+    --ring: var(--foreground);
+    
+    /* State Colors - Dark Mode */
+    --destructive: #dc2626;
+    --destructive-foreground: #ffffff;
+    
+    /* Component Specific - Dark Mode */
+    --card: var(--background);
+    --card-foreground: var(--foreground);
+    --popover: var(--background);
+    --popover-foreground: var(--foreground);
+    
+    /* Shadows - Dark Mode */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.4);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+  }
+}
